@@ -1,0 +1,125 @@
+# File: roles/samba/tasks/main.yml
+---
+
+- name: Update apt repositories
+  become: true
+  ansible.builtin.apt:
+    update-cache: true
+    cache_valid_time: 3600
+
+- name: Install Samba Services
+  become: true
+  ansible.builtin.apt:
+    name:
+      - samba
+      - samba-common
+      - samba-client
+      - samba-vfs-modules
+
+- name: Reload service daemons
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    daemon_reload: true
+    enabled: true
+  loop: 
+      - nmbd
+      - smbd
+
+- name: Make sure SELinux boolean settings are correct
+  ansible.builtin.seboolean:
+    name: "{{ item }}"
+    state: true
+    persistent: true
+  loop: "{{ samba_selinux_booleans }}"
+  when: ansible_selinux is defined and ansible_selinux.status == 'enabled'
+
+- name: Create Samba shares root directory
+  ansible.builtin.file:
+    state: directory
+    path: "{{ samba_shares_root }}"
+    owner: root
+    group: root
+    mode: '0755'
+  when: samba_shares|length > 0
+
+- name: Create share directories
+  ansible.builtin.file:
+    state: directory
+    recurse: true
+    path: "{{ item.path|default([samba_shares_root,item.name]|join('/')) }}"
+    owner: "{{ item.owner|default('root') }}"
+    group: "{{ item.group|default('users') }}"
+    mode: "{{ item.directory_mode|default('0775') }}"
+    setype: "{{ item.setype|default('samba_share_t') }}"
+  loop: "{{ samba_shares }}"
+
+- name: Samba configuration
+  ansible.builtin.template:
+    dest: "{{ samba_configuration }}"
+    src: smb.conf.j2
+    validate: 'testparm -s %s'
+    mode: 0644
+  notify:
+    - Restart Samba services
+
+- name: Install global include file
+  ansible.builtin.template:
+    src: "{{ samba_global_include }}"
+    dest: "{{ samba_configuration_dir }}"
+    validate: 'testparm -s %s'
+    mode: 0644
+  when: samba_global_include is defined
+  notify:
+    - Restart Samba services
+
+- name: Install home include file
+  ansible.builtin.template:
+    src: "{{ samba_homes_include }}"
+    dest: "{{ samba_configuration_dir }}"
+    validate: 'testparm -s %s'
+    mode: 0644
+  when: samba_homes_include is defined
+  notify:
+    - Restart Samba services
+
+- name: Install share specific include files
+  ansible.builtin.template:
+    src: "{{ item.include_file }}"
+    dest: "{{ samba_configuration_dir }}"
+    validate: 'testparm -s %s'
+    mode: 0644
+  when: item.include_file is defined
+  notify:
+    - Restart Samba services
+  loop: "{{ samba_shares }}"
+
+- name: Create username map file if needed
+  ansible.builtin.template:
+    dest: "{{ samba_username_map_file }}"
+    src: smbusers.j2
+    mode: 0644
+  notify:
+    - Restart Samba services
+  when: samba_username_map is defined
+
+- name: Start Samba service(s)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: 
+    - nmbd
+    - smbd
+
+- name: Create Samba users if they don't exist yet
+  ansible.builtin.shell: >
+    set -o nounset -o pipefail -o errexit &&
+    (pdbedit --user={{ item.name }} 2>&1 > /dev/null) \
+    || (echo {{ item.password }}; echo {{ item.password }}) \
+    | smbpasswd -s -a {{ item.name }}
+  args:
+    executable: /bin/bash
+  loop: "{{ samba_users }}"
+  no_log: true
+  register: create_user_output
+  changed_when: "'Added user' in create_user_output.stdout"

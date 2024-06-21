@@ -1,0 +1,4 @@
+---
+- hosts: "{{ test_host | default('localhost') }}"
+  roles:
+    - role: acr-ansible-samba-share
